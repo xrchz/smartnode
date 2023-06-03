@@ -1,4 +1,4 @@
-package graffiti_wall_writer
+package rocketarb
 
 import (
 	"github.com/rocket-pool/smartnode/shared/types/config"
