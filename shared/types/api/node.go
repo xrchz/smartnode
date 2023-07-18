@@ -278,6 +278,17 @@ type NodeSendResponse struct {
 	TxHash common.Hash `json:"txHash"`
 }
 
+type CanNodeSendMessageResponse struct {
+	Status  string             `json:"status"`
+	Error   string             `json:"error"`
+	GasInfo rocketpool.GasInfo `json:"gasInfo"`
+}
+type NodeSendMessageResponse struct {
+	Status string      `json:"status"`
+	Error  string      `json:"error"`
+	TxHash common.Hash `json:"txHash"`
+}
+
 type CanNodeBurnResponse struct {
 	Status                 string             `json:"status"`
 	Error                  string             `json:"error"`
@@ -391,11 +402,11 @@ type NodeInitializeFeeDistributorResponse struct {
 	TxHash common.Hash `json:"txHash"`
 }
 type NodeCanDistributeResponse struct {
-	Status         string             `json:"status"`
-	Error          string             `json:"error"`
-	Balance        *big.Int           `json:"balance"`
-	AverageNodeFee float64            `json:"averageNodeFee"`
-	GasInfo        rocketpool.GasInfo `json:"gasInfo"`
+	Status    string             `json:"status"`
+	Error     string             `json:"error"`
+	Balance   *big.Int           `json:"balance"`
+	NodeShare float64            `json:"nodeShare"`
+	GasInfo   rocketpool.GasInfo `json:"gasInfo"`
 }
 type NodeDistributeResponse struct {
 	Status string      `json:"status"`

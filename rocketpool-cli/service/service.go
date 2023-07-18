@@ -155,11 +155,11 @@ ______           _        _    ______           _
 	fmt.Printf("%s=== Rescuing Dissolved Minipools ===%s\n", colorGreen, colorReset)
 	fmt.Println("The new `rocketpool minipool rescue-dissolved` command can be used to \"rescue\" a dissolved minipool so you can retrieve the ETH it has locked on the Beacon Chain. You'll need enough ETH to complete its 32 ETH bond in order to do this. Please see the guide for more details: https://docs.rocketpool.net/guides/node/rescue-dissolved.html\n")
 
-	fmt.Printf("%s=== RPL Stake-on-Behalf ===%s\n", colorGreen, colorReset)
-	fmt.Println("The Stake-on-Behalf feature of the Rocket Pool staking website has made a return, and now comes with a whitelist so only addresses you allow can use it. Add or remove addresses to or from your whitelist with the new `rocketpool node add-address-to-stake-rpl-whitelist` and `rocketpool node remove-address-from-stake-rpl-whitelist` commands!\n")
+	fmt.Printf("%s=== Geth Changes ===%s\n", colorGreen, colorReset)
+	fmt.Println("Geth now uses the modern Pebble database for all new syncs which is faster and more reliable than the old LevelDB database, so the checkbox for \"Use Pebble\" has been removed from its settings in the config TUI.\nIf you previously synced Geth using the old LevelDB format, it will still work but if you want to upgrade to the new database, you'll need to resync it with `rocketpool service resync-eth1`.\n")
 
-	fmt.Printf("%s=== Rewardable RPL Display ===%s\n", colorGreen, colorReset)
-	fmt.Println("`rocketpool node status` and the Grafana dashboard now show how much of your RPL stake is eligible for RPL rewards. To contribute towards your node's eligible RPL stake, a minipool must be active on the Beacon Chain; it can't be pending in the queue or exited.")
+	fmt.Printf("%s=== Nethermind Changes ===%s\n", colorGreen, colorReset)
+	fmt.Println("Nethermind has undergone a significant update and now uses *dramatically* less disk space and RAM. To take advantage of the new disk space savings, you'll need to resync it with `rocketpool service resync-eth1`.")
 }
 
 // Install the Rocket Pool update tracker for the metrics dashboard
@@ -941,10 +941,11 @@ func checkForValidatorChange(rp *rocketpool.Client, cfg *config.RocketPoolConfig
 			fmt.Println("The new client can be safely started.")
 		} else {
 			fmt.Printf("%s=== WARNING ===\n", colorRed)
-			fmt.Printf("You have changed your validator client from %s to %s.\n", currentValidatorName, pendingValidatorName)
-			fmt.Println("If you have active validators, starting the new client immediately will cause them to be slashed due to duplicate attestations!")
+			fmt.Printf("You have changed your validator client from %s to %s. Only %s has elapsed since you stopped %s.\n", currentValidatorName, pendingValidatorName, time.Since(validatorFinishTime), currentValidatorName)
+			fmt.Printf("If you were actively validating while using %s, starting %s without waiting will cause your validators to be slashed due to duplicate attestations!", currentValidatorName, pendingValidatorName)
 			fmt.Println("To prevent slashing, Rocket Pool will delay activating the new client for 15 minutes.")
-			fmt.Printf("If you want to bypass this cooldown and understand the risks, run `rocketpool service start --ignore-slash-timer`.%s\n\n", colorReset)
+			fmt.Println("See the documentation for a more detailed explanation: https://docs.rocketpool.net/guides/node/maintenance/node-migration.html#slashing-and-the-slashing-database")
+			fmt.Printf("If you have read the documentation, understand the risks, and want to bypass this cooldown, run `rocketpool service start --ignore-slash-timer`.%s\n\n", colorReset)
 
 			// Wait for 15 minutes
 			for remainingTime > 0 {
