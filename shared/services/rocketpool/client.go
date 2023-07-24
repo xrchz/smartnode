@@ -2,13 +2,14 @@ package rocketpool
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"github.com/mitchellh/go-homedir"
 	"github.com/rocket-pool/smartnode/addons/graffiti_wall_writer"
 	"github.com/rocket-pool/smartnode/shared/services/config"
+	"github.com/rocket-pool/smartnode/shared/types/api"
 	cfgtypes "github.com/rocket-pool/smartnode/shared/types/config"
 	"github.com/rocket-pool/smartnode/shared/utils/rp"
 )
@@ -36,11 +38,8 @@ const (
 	InstallerURL     string = "https://github.com/rocket-pool/smartnode-install/releases/download/%s/install.sh"
 	UpdateTrackerURL string = "https://github.com/rocket-pool/smartnode-install/releases/download/%s/install-update-tracker.sh"
 
-	LegacyBackupFolder       string = "old_config_backup"
 	SettingsFile             string = "user-settings.yml"
 	BackupSettingsFile       string = "user-settings-backup.yml"
-	LegacyConfigFile         string = "config.yml"
-	LegacySettingsFile       string = "settings.yml"
 	PrometheusConfigTemplate string = "prometheus.tmpl"
 	PrometheusFile           string = "prometheus.yml"
 
@@ -61,6 +60,13 @@ const (
 
 	DebugColor = color.FgYellow
 )
+
+// When printing sync percents, we should avoid printing 100%.
+// This function is only called if we're still syncing,
+// and the `%0.2f` token will round up if we're above 99.99%.
+func SyncRatioToPercent(in float64) float64 {
+	return math.Min(99.99, in*100)
+}
 
 // Get the external IP address. Try finding an IPv4 address first to:
 // * Improve peer discovery and node performance
@@ -96,57 +102,128 @@ type Client struct {
 	forceFallbacks     bool
 }
 
-// Create new Rocket Pool client from CLI context
-func NewClientFromCtx(c *cli.Context) (*Client, error) {
-	return NewClient(c.GlobalString("config-path"),
-		c.GlobalString("daemon-path"),
-		c.GlobalFloat64("maxFee"),
-		c.GlobalFloat64("maxPrioFee"),
-		c.GlobalUint64("gasLimit"),
-		c.GlobalString("nonce"),
-		c.GlobalBool("debug"))
+func getClientStatusString(clientStatus api.ClientStatus) string {
+	if clientStatus.IsSynced {
+		return "synced and ready"
+	}
+
+	if clientStatus.IsWorking {
+		return fmt.Sprintf("syncing (%.2f%%)", SyncRatioToPercent(clientStatus.SyncProgress))
+	}
+
+	return fmt.Sprintf("unavailable (%s)", clientStatus.Error)
 }
 
-// Create new Rocket Pool client
-func NewClient(configPath string, daemonPath string, maxFee float64, maxPrioFee float64, gasLimit uint64, customNonce string, debug bool) (*Client, error) {
+// Check the status of the Execution and Consensus client(s) and provision the API with them
+func checkClientStatus(rp *Client) (bool, error) {
 
-	// Initialize SSH client if configured for SSH
-	var sshClient *ssh.Client
-	var customNonceBigInt *big.Int = nil
-	var success bool
-	if customNonce != "" {
-		customNonceBigInt, success = big.NewInt(0).SetString(customNonce, 0)
-		if !success {
-			return nil, fmt.Errorf("Invalid nonce: %s", customNonce)
-		}
+	// Check if the primary clients are up, synced, and able to respond to requests - if not, forces the use of the fallbacks for this command
+	response, err := rp.GetClientStatus()
+	if err != nil {
+		return false, err
 	}
+
+	ecMgrStatus := response.EcManagerStatus
+	bcMgrStatus := response.BcManagerStatus
+
+	// Primary EC and CC are good
+	if ecMgrStatus.PrimaryClientStatus.IsSynced && bcMgrStatus.PrimaryClientStatus.IsSynced {
+		rp.SetClientStatusFlags(true, false)
+		return true, nil
+	}
+
+	// Get the status messages
+	primaryEcStatus := getClientStatusString(ecMgrStatus.PrimaryClientStatus)
+	primaryBcStatus := getClientStatusString(bcMgrStatus.PrimaryClientStatus)
+	fallbackEcStatus := getClientStatusString(ecMgrStatus.FallbackClientStatus)
+	fallbackBcStatus := getClientStatusString(bcMgrStatus.FallbackClientStatus)
+
+	// Check the fallbacks if enabled
+	if ecMgrStatus.FallbackEnabled && bcMgrStatus.FallbackEnabled {
+
+		// Fallback EC and CC are good
+		if ecMgrStatus.FallbackClientStatus.IsSynced && bcMgrStatus.FallbackClientStatus.IsSynced {
+			fmt.Printf("%sNOTE: primary clients are not ready, using fallback clients...\n\tPrimary EC status: %s\n\tPrimary CC status: %s%s\n\n", colorYellow, primaryEcStatus, primaryBcStatus, colorReset)
+			rp.SetClientStatusFlags(true, true)
+			return true, nil
+		}
+
+		// Both pairs aren't ready
+		fmt.Printf("Error: neither primary nor fallback client pairs are ready.\n\tPrimary EC status: %s\n\tFallback EC status: %s\n\tPrimary CC status: %s\n\tFallback CC status: %s\n", primaryEcStatus, fallbackEcStatus, primaryBcStatus, fallbackBcStatus)
+		return false, nil
+	}
+
+	// Primary isn't ready and fallback isn't enabled
+	fmt.Printf("Error: primary client pair isn't ready and fallback clients aren't enabled.\n\tPrimary EC status: %s\n\tPrimary CC status: %s", primaryEcStatus, primaryBcStatus)
+	return false, nil
+}
+
+// Create new Rocket Pool client from CLI context without checking for sync status
+// Only use this function from commands that may work if the Daemon service doesn't exist
+// Most users should call NewClientFromCtx(c).WithStatus() or NewClientFromCtx(c).WithReady()
+func NewClientFromCtx(c *cli.Context) *Client {
 
 	// Return client
 	client := &Client{
-		configPath:         os.ExpandEnv(configPath),
-		daemonPath:         os.ExpandEnv(daemonPath),
-		maxFee:             maxFee,
-		maxPrioFee:         maxPrioFee,
-		gasLimit:           gasLimit,
-		originalMaxFee:     maxFee,
-		originalMaxPrioFee: maxPrioFee,
-		originalGasLimit:   gasLimit,
-		customNonce:        customNonceBigInt,
-		client:             sshClient,
-		debugPrint:         debug,
+		configPath:         os.ExpandEnv(c.GlobalString("config-path")),
+		daemonPath:         os.ExpandEnv(c.GlobalString("daemon-path")),
+		maxFee:             c.GlobalFloat64("maxFee"),
+		maxPrioFee:         c.GlobalFloat64("maxPrioFee"),
+		gasLimit:           c.GlobalUint64("gasLimit"),
+		originalMaxFee:     c.GlobalFloat64("maxFee"),
+		originalMaxPrioFee: c.GlobalFloat64("maxPrioFee"),
+		originalGasLimit:   c.GlobalUint64("gasLimit"),
+		debugPrint:         c.GlobalBool("debug"),
 		forceFallbacks:     false,
 		ignoreSyncCheck:    false,
 	}
 
-	return client, nil
+	if nonce, ok := c.App.Metadata["nonce"]; ok {
+		client.customNonce = nonce.(*big.Int)
+	}
 
+	return client
+}
+
+// Check the status of a newly created client and return it
+// Only use this function from commands that may work without the clients being synced-
+// most users should use WithReady instead
+func (c *Client) WithStatus() (*Client, bool, error) {
+	ready, err := checkClientStatus(c)
+	if err != nil {
+		c.Close()
+		return nil, false, err
+	}
+
+	return c, ready, nil
+}
+
+// Check the status of a newly created client and ensure the eth clients are synced and ready
+func (c *Client) WithReady() (*Client, error) {
+	_, ready, err := c.WithStatus()
+	if err != nil {
+		return nil, err
+	}
+
+	if !ready {
+		c.Close()
+		return nil, fmt.Errorf("clients not ready")
+	}
+
+	return c, nil
 }
 
 // Close client remote connection
 func (c *Client) Close() {
-	if c.client != nil {
-		_ = c.client.Close()
+	if c == nil {
+		return
 	}
+
+	if c.client == nil {
+		return
+	}
+
+	_ = c.client.Close()
 }
 
 // Load the config
@@ -209,36 +286,6 @@ func (c *Client) IsFirstRun() (bool, error) {
 	return rp.IsFirstRun(expandedPath), nil
 }
 
-// Load the legacy config if one exists
-func (c *Client) LoadLegacyConfigFromBackup() (*config.RocketPoolConfig, error) {
-	// Check if the backup config file exists
-	configPath, err := homedir.Expand(filepath.Join(c.configPath, LegacyBackupFolder, LegacyConfigFile))
-	if err != nil {
-		return nil, fmt.Errorf("Error expanding legacy config file path: %w", err)
-	}
-	_, err = os.Stat(configPath)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-
-	// The backup config file exists, try loading the settings file
-	settingsPath, err := homedir.Expand(filepath.Join(c.configPath, LegacyBackupFolder, LegacySettingsFile))
-	if err != nil {
-		return nil, fmt.Errorf("Error expanding legacy settings file path: %w", err)
-	}
-	_, err = os.Stat(settingsPath)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("Found a legacy config.yml file in the backup directory but not a legacy settings.yml file.")
-	}
-
-	// Migrate the old config to a new one
-	newCfg, err := c.MigrateLegacyConfig(configPath, settingsPath)
-	if err != nil {
-		return nil, fmt.Errorf("Error migrating legacy config from a previous installation: %w", err)
-	}
-	return newCfg, nil
-}
-
 // Load the Prometheus template, do an environment variable substitution, and save it
 func (c *Client) UpdatePrometheusConfiguration(settings map[string]string) error {
 	prometheusTemplatePath, err := homedir.Expand(fmt.Sprintf("%s/%s", c.configPath, PrometheusConfigTemplate))
@@ -282,202 +329,8 @@ func (c *Client) UpdatePrometheusConfiguration(settings map[string]string) error
 	return nil
 }
 
-// Migrate a legacy configuration (pre-v1.3) to a modern post-v1.3 one
-func (c *Client) MigrateLegacyConfig(legacyConfigFilePath string, legacySettingsFilePath string) (*config.RocketPoolConfig, error) {
-
-	// Check if the files exist
-	_, err := os.Stat(legacyConfigFilePath)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("Legacy configuration file [%s] does not exist or is not accessible.", legacyConfigFilePath)
-	}
-	_, err = os.Stat(legacySettingsFilePath)
-	if os.IsNotExist(err) {
-		return nil, fmt.Errorf("Legacy settings file [%s] does not exist or is not accessible.", legacySettingsFilePath)
-	}
-
-	// Load the legacy config
-	isNative := (c.daemonPath != "")
-	legacyCfg, err := c.LoadMergedConfig_Legacy(legacyConfigFilePath, legacySettingsFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("error loading legacy configuration: %w", err)
-	}
-	cfg := config.NewRocketPoolConfig(c.configPath, isNative)
-
-	// Do the conversion
-
-	// Network
-	chainID := legacyCfg.Chains.Eth1.ChainID
-	var network cfgtypes.Network
-	switch chainID {
-	case "1":
-		network = cfgtypes.Network_Mainnet
-	case "5":
-		network = cfgtypes.Network_Prater
-	default:
-		return nil, fmt.Errorf("legacy config had an unknown chain ID [%s]", chainID)
-	}
-	cfg.Smartnode.Network.Value = network
-
-	// Migrate the EC
-	err = c.migrateProviderInfo(legacyCfg.Chains.Eth1.Provider, legacyCfg.Chains.Eth1.WsProvider, "eth1", &cfg.ExecutionClientMode, &cfg.ExecutionCommon.HttpPort, &cfg.ExecutionCommon.WsPort, &cfg.ExternalExecution.HttpUrl, &cfg.ExternalExecution.WsUrl)
-	if err != nil {
-		return nil, fmt.Errorf("error migrating eth1 provider info: %w", err)
-	}
-
-	err = c.migrateEcSelection(legacyCfg.Chains.Eth1.Client.Selected, &cfg.ExecutionClient, &cfg.ExecutionClientMode)
-	if err != nil {
-		return nil, fmt.Errorf("error migrating eth1 client selection: %w", err)
-	}
-
-	err = c.migrateEth1Params(legacyCfg.Chains.Eth1.Client.Selected, network, legacyCfg.Chains.Eth1.Client.Params, cfg.ExecutionCommon, cfg.Geth, cfg.ExternalExecution)
-	if err != nil {
-		return nil, fmt.Errorf("error migrating eth1 params: %w", err)
-	}
-
-	// Disable fallback migration which didn't exist in the same sense with v1.2.x
-	cfg.UseFallbackClients.Value = false
-
-	// Migrate the CC
-	ccProvider := legacyCfg.Chains.Eth2.Provider
-	ccMode, ccPort, err := c.getLegacyProviderInfo(ccProvider, "eth2")
-	if err != nil {
-		return nil, fmt.Errorf("error migrating eth2 provider info: %w", err)
-	}
-	cfg.ConsensusClientMode.Value = ccMode
-
-	selectedCC := legacyCfg.Chains.Eth2.Client.Selected
-	if ccMode == cfgtypes.Mode_Local {
-		err = c.migrateCcSelection(selectedCC, &cfg.ConsensusClient)
-		if err != nil {
-			return nil, fmt.Errorf("error migrating local eth2 client selection: %w", err)
-		}
-		cfg.ConsensusCommon.ApiPort.Value = ccPort
-	} else {
-		err = c.migrateCcSelection(selectedCC, &cfg.ExternalConsensusClient)
-		if err != nil {
-			return nil, fmt.Errorf("error migrating external eth2 client selection: %w", err)
-		}
-		cfg.ExternalLighthouse.HttpUrl.Value = ccProvider
-		cfg.ExternalPrysm.HttpUrl.Value = ccProvider
-		cfg.ExternalTeku.HttpUrl.Value = ccProvider
-	}
-
-	for _, param := range legacyCfg.Chains.Eth2.Client.Params {
-		switch param.Env {
-		case config.CustomGraffitiEnvVar:
-			cfg.ConsensusCommon.Graffiti.Value = param.Value
-			cfg.ExternalLighthouse.Graffiti.Value = param.Value
-			cfg.ExternalPrysm.Graffiti.Value = param.Value
-			cfg.ExternalTeku.Graffiti.Value = param.Value
-		case "ETH2_MAX_PEERS":
-			switch cfg.ConsensusClient.Value.(cfgtypes.ConsensusClient) {
-			case cfgtypes.ConsensusClient_Lighthouse:
-				convertUintParam(param, &cfg.Lighthouse.MaxPeers, network, 16)
-			case cfgtypes.ConsensusClient_Nimbus:
-				convertUintParam(param, &cfg.Nimbus.MaxPeers, network, 16)
-			case cfgtypes.ConsensusClient_Prysm:
-				convertUintParam(param, &cfg.Prysm.MaxPeers, network, 16)
-			case cfgtypes.ConsensusClient_Teku:
-				convertUintParam(param, &cfg.Teku.MaxPeers, network, 16)
-			}
-		case "ETH2_P2P_PORT":
-			convertUintParam(param, &cfg.ConsensusCommon.P2pPort, network, 16)
-		case "ETH2_CHECKPOINT_SYNC_URL":
-			cfg.ConsensusCommon.CheckpointSyncProvider.Value = param.Value
-		case "ETH2_DOPPELGANGER_DETECTION":
-			if param.Value == "y" {
-				cfg.ConsensusCommon.DoppelgangerDetection.Value = true
-				cfg.ExternalLighthouse.DoppelgangerDetection.Value = true
-				cfg.ExternalPrysm.DoppelgangerDetection.Value = true
-			} else {
-				cfg.ConsensusCommon.DoppelgangerDetection.Value = false
-				cfg.ExternalLighthouse.DoppelgangerDetection.Value = false
-				cfg.ExternalPrysm.DoppelgangerDetection.Value = false
-			}
-		case "ETH2_RPC_PORT":
-			convertUintParam(param, &cfg.Prysm.RpcPort, network, 16)
-			port := cfg.Prysm.RpcPort.Value.(uint16)
-			cfg.Prysm.RpcPort.Value = uint16(port)
-			externalPrysmUrl := strings.Replace(ccProvider, fmt.Sprintf(":%d", ccPort), fmt.Sprintf(":%d", port), 1)
-			cfg.ExternalPrysm.JsonRpcUrl.Value = externalPrysmUrl
-		}
-	}
-
-	// Migrate metrics
-	cfg.EnableMetrics.Value = legacyCfg.Metrics.Enabled
-	for _, param := range legacyCfg.Metrics.Settings {
-		switch param.Env {
-		case "ETH2_METRICS_PORT":
-			convertUintParam(param, &cfg.BnMetricsPort, network, 16)
-		case "VALIDATOR_METRICS_PORT":
-			convertUintParam(param, &cfg.VcMetricsPort, network, 16)
-		case "NODE_METRICS_PORT":
-			convertUintParam(param, &cfg.NodeMetricsPort, network, 16)
-		case "EXPORTER_METRICS_PORT":
-			convertUintParam(param, &cfg.ExporterMetricsPort, network, 16)
-		case "WATCHTOWER_METRICS_PORT":
-			convertUintParam(param, &cfg.WatchtowerMetricsPort, network, 16)
-		case "PROMETHEUS_PORT":
-			convertUintParam(param, &cfg.Prometheus.Port, network, 16)
-		case "GRAFANA_PORT":
-			convertUintParam(param, &cfg.Grafana.Port, network, 16)
-		}
-	}
-
-	// Top-level parameters
-	cfg.ReconnectDelay.Value = legacyCfg.Chains.Eth1.ReconnectDelay
-	if cfg.ReconnectDelay.Value == "" {
-		cfg.ReconnectDelay.Value = cfg.ReconnectDelay.Default[cfgtypes.Network_All]
-	}
-
-	// Smartnode settings
-	cfg.Smartnode.ProjectName.Value = legacyCfg.Smartnode.ProjectName
-	cfg.Smartnode.ManualMaxFee.Value = legacyCfg.Smartnode.MaxFee
-	cfg.Smartnode.PriorityFee.Value = legacyCfg.Smartnode.MaxPriorityFee
-	cfg.Smartnode.AutoTxGasThreshold.Value = legacyCfg.Smartnode.MinipoolStakeGasThreshold
-
-	// Docker images
-	for _, option := range legacyCfg.Chains.Eth1.Client.Options {
-		if option.ID == "geth" {
-			cfg.Geth.ContainerTag.Value = option.Image
-		}
-	}
-	for _, option := range legacyCfg.Chains.Eth2.Client.Options {
-		switch option.ID {
-		case "lighthouse":
-			cfg.Lighthouse.ContainerTag.Value = option.Image
-			cfg.ExternalLighthouse.ContainerTag.Value = option.Image
-		case "nimbus":
-			cfg.Nimbus.BnContainerTag.Value = option.Image
-		case "prysm":
-			cfg.Prysm.BnContainerTag.Value = option.BeaconImage
-			cfg.Prysm.VcContainerTag.Value = option.ValidatorImage
-			cfg.ExternalPrysm.ContainerTag.Value = option.ValidatorImage
-		case "teku":
-			cfg.Teku.ContainerTag.Value = option.Image
-			cfg.ExternalTeku.ContainerTag.Value = option.Image
-		}
-	}
-
-	// Handle native mode
-	cfg.Native.EcHttpUrl.Value = legacyCfg.Chains.Eth1.Provider
-	cfg.Native.CcHttpUrl.Value = legacyCfg.Chains.Eth2.Provider
-	c.migrateCcSelection(legacyCfg.Chains.Eth2.Client.Selected, &cfg.Native.ConsensusClient)
-	cfg.Native.ValidatorRestartCommand.Value = legacyCfg.Smartnode.ValidatorRestartCommand
-	cfg.Smartnode.DataPath.Value = filepath.Join(c.configPath, "data")
-
-	return cfg, nil
-
-}
-
 // Install the Rocket Pool service
 func (c *Client) InstallService(verbose, noDeps bool, network, version, path string, dataPath string) error {
-
-	// Get installation script downloader type
-	downloader, err := c.getDownloader()
-	if err != nil {
-		return err
-	}
 
 	// Get installation script flags
 	flags := []string{
@@ -494,14 +347,37 @@ func (c *Client) InstallService(verbose, noDeps bool, network, version, path str
 		flags = append(flags, fmt.Sprintf("-u %s", dataPath))
 	}
 
+	// Download the installation script
+	resp, err := http.Get(fmt.Sprintf(InstallerURL, version))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected http status downloading installation script: %d", resp.StatusCode)
+	}
+
+	// Sanity check that the script octet length matches content-length
+	script, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if fmt.Sprint(len(script)) != resp.Header.Get("content-length") {
+		return fmt.Errorf("downloaded script length %d did not match content-length header %s", len(script), resp.Header.Get("content-length"))
+	}
+
 	// Initialize installation command
-	cmd, err := c.newCommand(fmt.Sprintf("%s %s | sh -s -- %s", downloader, fmt.Sprintf(InstallerURL, version), strings.Join(flags, " ")))
+	cmd, err := c.newCommand(fmt.Sprintf("sh -s -- %s", strings.Join(flags, " ")))
 	if err != nil {
 		return err
 	}
 	defer func() {
 		_ = cmd.Close()
 	}()
+
+	// Pass the script to sh via its stdin fd
+	cmd.SetStdin(bytes.NewReader(script))
 
 	// Get command output pipes
 	cmdOut, err := cmd.StdoutPipe()
@@ -1132,192 +1008,6 @@ func (c *Client) checkIfCommandExists(command string) (bool, error) {
 	}
 }
 
-// Get the provider mode and port from a legacy config's provider URL
-func (c *Client) migrateProviderInfo(provider string, wsProvider string, localHostname string, clientMode *cfgtypes.Parameter, httpPortParam *cfgtypes.Parameter, wsPortParam *cfgtypes.Parameter, externalHttpUrlParam *cfgtypes.Parameter, externalWsUrlParam *cfgtypes.Parameter) error {
-
-	// Get HTTP provider
-	mode, port, err := c.getLegacyProviderInfo(provider, localHostname)
-	if err != nil {
-		return fmt.Errorf("error parsing %s provider: %w", localHostname, err)
-	}
-
-	// Set the mode, provider, port, and/or URL
-	clientMode.Value = mode
-	if mode == cfgtypes.Mode_Local {
-		httpPortParam.Value = port
-	} else {
-		externalHttpUrlParam.Value = provider
-	}
-
-	// Get the websocket provider
-	if wsProvider != "" {
-		_, wsPort, err := c.getLegacyProviderInfo(wsProvider, localHostname)
-		if err != nil {
-			return fmt.Errorf("error parsing %s websocket provider: %w", localHostname, err)
-		}
-		if mode == cfgtypes.Mode_Local {
-			wsPortParam.Value = wsPort
-		} else {
-			externalWsUrlParam.Value = wsProvider
-		}
-	}
-
-	return nil
-
-}
-
-// Get the provider mode and port from a legacy config's provider URL
-func (c *Client) getLegacyProviderInfo(provider string, localHostname string) (cfgtypes.Mode, uint16, error) {
-
-	providerUrl, err := url.Parse(provider)
-	if err != nil {
-		return cfgtypes.Mode_Unknown, 0, fmt.Errorf("error parsing %s provider: %w", localHostname, err)
-	}
-
-	var mode cfgtypes.Mode
-	if providerUrl.Hostname() == localHostname {
-		// This is Docker mode
-		mode = cfgtypes.Mode_Local
-	} else {
-		// This is Hybrid mode
-		mode = cfgtypes.Mode_External
-	}
-
-	var port uint16
-	portString := providerUrl.Port()
-	if portString == "" {
-		switch providerUrl.Scheme {
-		case "http", "ws":
-			port = 80
-		case "https", "wss":
-			port = 443
-		default:
-			return cfgtypes.Mode_Unknown, 0, fmt.Errorf("provider [%s] doesn't provide port info and it can't be inferred from the scheme", provider)
-		}
-	} else {
-		parsedPort, err := strconv.ParseUint(portString, 0, 16)
-		if err != nil {
-			return cfgtypes.Mode_Unknown, 0, fmt.Errorf("invalid port [%s] in %s provider [%s]", portString, localHostname, provider)
-		}
-		port = uint16(parsedPort)
-	}
-
-	return mode, port, nil
-
-}
-
-// Sets a modern config's selected EC / mode based on a legacy config
-func (c *Client) migrateEcSelection(legacySelectedClient string, ecParam *cfgtypes.Parameter, ecModeParam *cfgtypes.Parameter) error {
-	// EC selection
-	switch legacySelectedClient {
-	case "geth":
-		ecParam.Value = cfgtypes.ExecutionClient_Geth
-	case "infura":
-		ecParam.Value = cfgtypes.ExecutionClient_Geth
-	case "pocket":
-		ecParam.Value = cfgtypes.ExecutionClient_Geth
-	case "custom":
-		ecModeParam.Value = cfgtypes.Mode_External
-	case "":
-		break
-	default:
-		return fmt.Errorf("unknown eth1 client [%s]", legacySelectedClient)
-	}
-
-	return nil
-}
-
-// Sets a modern config's selected CC / mode based on a legacy config
-func (c *Client) migrateCcSelection(legacySelectedClient string, ccParam *cfgtypes.Parameter) error {
-	// CC selection
-	switch legacySelectedClient {
-	case "lighthouse":
-		ccParam.Value = cfgtypes.ConsensusClient_Lighthouse
-	case "nimbus":
-		ccParam.Value = cfgtypes.ConsensusClient_Nimbus
-	case "prysm":
-		ccParam.Value = cfgtypes.ConsensusClient_Prysm
-	case "teku":
-		ccParam.Value = cfgtypes.ConsensusClient_Teku
-	default:
-		return fmt.Errorf("unknown eth2 client [%s]", legacySelectedClient)
-	}
-
-	return nil
-}
-
-// Migrates the parameters from a legacy eth1 config to a modern one
-func (c *Client) migrateEth1Params(client string, network cfgtypes.Network, params []config.UserParam, ecCommon *config.ExecutionCommonConfig, geth *config.GethConfig, externalEc *config.ExternalExecutionConfig) error {
-	for _, param := range params {
-		switch param.Env {
-		case "ETHSTATS_LABEL":
-			if ecCommon != nil {
-				ecCommon.EthstatsLabel.Value = param.Value
-			}
-		case "ETHSTATS_LOGIN":
-			if ecCommon != nil {
-				ecCommon.EthstatsLogin.Value = param.Value
-			}
-		case "GETH_CACHE_SIZE":
-			if geth != nil {
-				convertUintParam(param, &geth.CacheSize, network, 0)
-			}
-		case "GETH_MAX_PEERS":
-			if geth != nil {
-				convertUintParam(param, &geth.MaxPeers, network, 16)
-			}
-		case "ETH1_P2P_PORT":
-			if ecCommon != nil {
-				convertUintParam(param, &ecCommon.P2pPort, network, 16)
-			}
-		case "HTTP_PROVIDER_URL":
-			if client == "custom" {
-				externalEc.HttpUrl.Value = param.Value
-			}
-		case "WS_PROVIDER_URL":
-			if client == "custom" {
-				externalEc.WsUrl.Value = param.Value
-			}
-		}
-	}
-
-	return nil
-}
-
-// Stores a legacy parameter's value in a new parameter, replacing blank values with the appropriate default.
-func convertUintParam(oldParam config.UserParam, newParam *cfgtypes.Parameter, network cfgtypes.Network, bitsize int) error {
-	if newParam == nil {
-		return nil
-	}
-
-	if oldParam.Value == "" {
-		valIface, err := newParam.GetDefault(network)
-		if err != nil {
-			return fmt.Errorf("failed to get default for param [%s] on network [%v]: %w", newParam.ID, network, err)
-		}
-		newParam.Value = valIface
-	} else {
-		value, err := strconv.ParseUint(oldParam.Value, 0, bitsize)
-		if err != nil {
-			return fmt.Errorf("invalid legacy setting [%s] for param [%s]: %w", oldParam.Value, newParam.ID, err)
-		}
-		switch bitsize {
-		case 0:
-			newParam.Value = uint(value)
-		case 16:
-			newParam.Value = uint16(value)
-		case 32:
-			newParam.Value = uint32(value)
-		case 64:
-			newParam.Value = value
-		default:
-			return fmt.Errorf("unexpected bitsize %d", bitsize)
-		}
-	}
-
-	return nil
-}
-
 // Build a docker compose command
 func (c *Client) compose(composeFiles []string, args string) (string, error) {
 
@@ -1787,26 +1477,6 @@ func (c *Client) getCustomNonce() string {
 		nonce = fmt.Sprintf("--nonce %s", c.customNonce.String())
 	}
 	return nonce
-}
-
-// Get the first downloader available to the system
-func (c *Client) getDownloader() (string, error) {
-
-	// Check for cURL
-	hasCurl, err := c.readOutput("command -v curl")
-	if err == nil && len(hasCurl) > 0 {
-		return "curl -sL", nil
-	}
-
-	// Check for wget
-	hasWget, err := c.readOutput("command -v wget")
-	if err == nil && len(hasWget) > 0 {
-		return "wget -qO-", nil
-	}
-
-	// Return error
-	return "", errors.New("Either cURL or wget is required to begin installation.")
-
 }
 
 // Run a command and print its output

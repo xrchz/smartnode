@@ -22,28 +22,16 @@ import (
 func rescueDissolved(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
+	rp, err := rocketpool.NewClientFromCtx(c).WithReady()
 	if err != nil {
 		return err
 	}
 	defer rp.Close()
 
-	// Check and assign the EC status
-	err = cliutils.CheckClientStatus(rp)
-	if err != nil {
-		return err
-	}
-
 	// Get minipool statuses
 	details, err := rp.GetMinipoolRescueDissolvedDetailsForNode()
 	if err != nil {
 		return err
-	}
-
-	// Exit if Atlas hasn't been deployed
-	if !details.IsAtlasDeployed {
-		fmt.Println("Minipools cannot be rescued until the Atlas upgrade has been activated.")
-		return nil
 	}
 
 	fmt.Println("This command will allow you to manually deposit the remaining ETH for any dissolved minipools, activating them so you can exit them and retrieve your minipool's funds.\nPlease read our guide at https://docs.rocketpool.net/guides/node/rescue-dissolved.html to fully read about the process before continuing.\n")

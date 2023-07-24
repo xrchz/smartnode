@@ -69,10 +69,7 @@ func installService(c *cli.Context) error {
 	}
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Attempt to load the config to see if any settings need to be passed along to the install script
@@ -106,25 +103,12 @@ func installService(c *cli.Context) error {
 		return fmt.Errorf("error loading new configuration: %w", err)
 	}
 
-	// Check if this is a migration
-	isMigration := false
-	if isNew {
-		// Look for a legacy config to migrate
-		migratedConfig, err := rp.LoadLegacyConfigFromBackup()
-		if err != nil {
-			return err
-		}
-		if migratedConfig != nil {
-			isMigration = true
-		}
-	}
-
 	// Report next steps
 	fmt.Printf("%s\n=== Next Steps ===\n", colorLightBlue)
 	fmt.Printf("Run 'rocketpool service config' to review the settings changes for this update, or to continue setting up your node.%s\n", colorReset)
 
 	// Print the docker permissions notice
-	if isNew && !isMigration {
+	if isNew {
 		fmt.Printf("\n%sNOTE:\nSince this is your first time installing Rocket Pool, please start a new shell session by logging out and back in or restarting the machine.\n", colorYellow)
 		fmt.Printf("This is necessary for your user account to have permissions to use Docker.%s", colorReset)
 	}
@@ -149,17 +133,11 @@ ______           _        _    ______           _
 	fmt.Printf("%s=== Smartnode v%s ===%s\n\n", colorGreen, shared.RocketPoolVersion, colorReset)
 	fmt.Printf("Changes you should be aware of before starting:\n\n")
 
-	fmt.Printf("%s=== New Grafana Dashboard ===%s\n", colorGreen, colorReset)
-	fmt.Println("We have a new Grafana dashboard out that supports many of the Atlas and Shapella features, such as how much ETH is waiting in your minipools to be distributed. To grab it, follow the import instructions: https://docs.rocketpool.net/guides/node/grafana.html#importing-the-rocket-pool-dashboard\n")
+	fmt.Printf("%s=== BREAKING CHANGE: Port Forwarding ===%s\n", colorGreen, colorReset)
+	fmt.Println("The \"Expose Port\" options for your Execution Client, Consensus Client, MEV-Boost, and Prometheus have changed with the release. Instead of being a simple checkbox, they are now a dropdown: \"Closed\" (previously unchecked), \"Open to Localhost\" (will only be accessible via your local machine, useful for people running on the Cloud / a VPS), and \"Open to External Hosts\" (previously checked). If you previously had your ports opened, you will need to go into the `service config` TUI and reopen them with the appropriate dropdown option after upgrading.\n")
 
-	fmt.Printf("%s=== Rescuing Dissolved Minipools ===%s\n", colorGreen, colorReset)
-	fmt.Println("The new `rocketpool minipool rescue-dissolved` command can be used to \"rescue\" a dissolved minipool so you can retrieve the ETH it has locked on the Beacon Chain. You'll need enough ETH to complete its 32 ETH bond in order to do this. Please see the guide for more details: https://docs.rocketpool.net/guides/node/rescue-dissolved.html\n")
-
-	fmt.Printf("%s=== Geth Changes ===%s\n", colorGreen, colorReset)
-	fmt.Println("Geth now uses the modern Pebble database for all new syncs which is faster and more reliable than the old LevelDB database, so the checkbox for \"Use Pebble\" has been removed from its settings in the config TUI.\nIf you previously synced Geth using the old LevelDB format, it will still work but if you want to upgrade to the new database, you'll need to resync it with `rocketpool service resync-eth1`.\n")
-
-	fmt.Printf("%s=== Nethermind Changes ===%s\n", colorGreen, colorReset)
-	fmt.Println("Nethermind has undergone a significant update and now uses *dramatically* less disk space and RAM. To take advantage of the new disk space savings, you'll need to resync it with `rocketpool service resync-eth1`.")
+	fmt.Printf("%s=== Rolling Records ===%s\n", colorGreen, colorReset)
+	fmt.Println("The Smartnode now has experimental support for Rolling Records, which capture snapshots of the entire Rocket Pool network's attestation performance in real time. This makes generating rewards trees at the end of the interval almost instantaneous, rather than taking hours. To learn more about Rolling Records, please visit the v1.10.0 release notes.")
 }
 
 // Install the Rocket Pool update tracker for the metrics dashboard
@@ -174,14 +152,11 @@ func installUpdateTracker(c *cli.Context) error {
 	}
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Install service
-	err = rp.InstallUpdateTracker(c.Bool("verbose"), c.String("version"))
+	err := rp.InstallUpdateTracker(c.Bool("verbose"), c.String("version"))
 	if err != nil {
 		return err
 	}
@@ -202,14 +177,11 @@ func installUpdateTracker(c *cli.Context) error {
 func serviceStatus(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Print what network we're on
-	err = cliutils.PrintNetwork(rp)
+	err := cliutils.PrintNetwork(rp)
 	if err != nil {
 		return err
 	}
@@ -235,10 +207,7 @@ func configureService(c *cli.Context) error {
 	}
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Load the config, checking to see if it's new (hasn't been installed before)
@@ -248,28 +217,14 @@ func configureService(c *cli.Context) error {
 		return fmt.Errorf("error loading user settings: %w", err)
 	}
 
-	// Check to see if this is a migration from a legacy config
-	isMigration := false
-	if isNew {
-		// Look for a legacy config to migrate
-		migratedConfig, err := rp.LoadLegacyConfigFromBackup()
-		if err != nil {
-			return err
-		}
-		if migratedConfig != nil {
-			cfg = migratedConfig
-			isMigration = true
-		}
-	}
-
 	// Check if this is a new install
 	isUpdate, err := rp.IsFirstRun()
 	if err != nil {
 		return fmt.Errorf("error checking for first-run status: %w", err)
 	}
 
-	// For migrations and upgrades, move the config to the old one and create a new upgraded copy
-	if isMigration || isUpdate {
+	// For upgrades, move the config to the old one and create a new upgraded copy
+	if isUpdate {
 		oldCfg = cfg
 		cfg = cfg.CreateCopy()
 		err = cfg.UpdateDefaults()
@@ -291,7 +246,7 @@ func configureService(c *cli.Context) error {
 	isNative := c.GlobalIsSet("daemon-path")
 
 	app := tview.NewApplication()
-	md := cliconfig.NewMainDisplay(app, oldCfg, cfg, isNew, isMigration, isUpdate, isNative)
+	md := cliconfig.NewMainDisplay(app, oldCfg, cfg, isNew, isUpdate, isNative)
 	err = app.Run()
 	if err != nil {
 		return err
@@ -518,10 +473,7 @@ func changeNetworks(c *cli.Context, rp *rocketpool.Client, apiContainerName stri
 func startService(c *cli.Context, ignoreConfigSuggestion bool) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Update the Prometheus template with the assigned ports
@@ -550,22 +502,7 @@ func startService(c *cli.Context, ignoreConfigSuggestion bool) error {
 		fmt.Printf("%sYou are using an externally-managed Execution client and a locally-managed Consensus client.\nThis configuration is not compatible with The Merge; please select either locally-managed or externally-managed for both the EC and CC.%s\n", colorRed, colorReset)
 	}
 
-	isMigration := false
 	if isNew {
-		// Look for a legacy config to migrate
-		migratedConfig, err := rp.LoadLegacyConfigFromBackup()
-		if err != nil {
-			return err
-		}
-		if migratedConfig != nil {
-			cfg = migratedConfig
-			isMigration = true
-		}
-	}
-
-	if isMigration {
-		return fmt.Errorf("You must upgrade your configuration before starting the Smartnode.\nPlease run `rocketpool service config` to confirm your settings were migrated correctly, and enjoy the new configuration UI!")
-	} else if isNew {
 		return fmt.Errorf("No configuration detected. Please run `rocketpool service config` to set up your Smartnode before running it.")
 	}
 
@@ -1039,10 +976,7 @@ func getContainerPrefix(rp *rocketpool.Client) (string, error) {
 func pruneExecutionClient(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Get the config
@@ -1178,10 +1112,7 @@ func pruneExecutionClient(c *cli.Context) error {
 func pauseService(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Get the config
@@ -1219,10 +1150,7 @@ func terminateService(c *cli.Context) error {
 	}
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return fmt.Errorf("%w\n%sTHERE WAS AN ERROR TERMINATING THE SMARTNODE SERVICE. Your keys have most likely not been deleted. Proceed with caution.%s", err, colorRed, colorReset)
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Stop service
@@ -1234,10 +1162,7 @@ func terminateService(c *cli.Context) error {
 func serviceLogs(c *cli.Context, serviceNames ...string) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Print service logs
@@ -1249,10 +1174,7 @@ func serviceLogs(c *cli.Context, serviceNames ...string) error {
 func serviceStats(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Print service stats
@@ -1264,10 +1186,7 @@ func serviceStats(c *cli.Context) error {
 func serviceCompose(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Print service compose config
@@ -1279,14 +1198,11 @@ func serviceCompose(c *cli.Context) error {
 func serviceVersion(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Print what network we're on
-	err = cliutils.PrintNetwork(rp)
+	err := cliutils.PrintNetwork(rp)
 	if err != nil {
 		return err
 	}
@@ -1401,10 +1317,7 @@ func getComposeFiles(c *cli.Context) []string {
 func resyncEth1(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Get the config
@@ -1485,10 +1398,7 @@ func resyncEth1(c *cli.Context) error {
 func resyncEth2(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Get the merged config
@@ -1621,10 +1531,7 @@ func getConfigYaml(c *cli.Context) error {
 func exportEcData(c *cli.Context, targetDir string) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Get the config
@@ -1744,10 +1651,7 @@ func exportEcData(c *cli.Context, targetDir string) error {
 func importEcData(c *cli.Context, sourceDir string) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
-	if err != nil {
-		return err
-	}
+	rp := rocketpool.NewClientFromCtx(c)
 	defer rp.Close()
 
 	// Get the config

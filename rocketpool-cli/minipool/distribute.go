@@ -25,28 +25,16 @@ const (
 func distributeBalance(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
+	rp, err := rocketpool.NewClientFromCtx(c).WithReady()
 	if err != nil {
 		return err
 	}
 	defer rp.Close()
 
-	// Check and assign the EC status
-	err = cliutils.CheckClientStatus(rp)
-	if err != nil {
-		return err
-	}
-
 	// Get balance distribution details
 	details, err := rp.GetDistributeBalanceDetails()
 	if err != nil {
 		return err
-	}
-
-	// Exit if Atlas hasn't been deployed
-	if !details.IsAtlasDeployed {
-		fmt.Println("Minipool balances cannot be distributed until the Atlas upgrade has been activated.")
-		return nil
 	}
 
 	// Sort minipools by status

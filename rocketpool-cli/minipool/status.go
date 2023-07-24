@@ -23,17 +23,11 @@ const colorYellow string = "\033[33m"
 func getStatus(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
+	rp, err := rocketpool.NewClientFromCtx(c).WithReady()
 	if err != nil {
 		return err
 	}
 	defer rp.Close()
-
-	// Check and assign the EC status
-	err = cliutils.CheckClientStatus(rp)
-	if err != nil {
-		return err
-	}
 
 	// Get minipool statuses
 	status, err := rp.MinipoolStatus()
@@ -44,7 +38,6 @@ func getStatus(c *cli.Context) error {
 	// Get minipools by status
 	statusMinipools := map[string][]api.MinipoolDetails{}
 	refundableMinipools := []api.MinipoolDetails{}
-	withdrawableMinipools := []api.MinipoolDetails{}
 	closeableMinipools := []api.MinipoolDetails{}
 	finalisedMinipools := []api.MinipoolDetails{}
 	for _, minipool := range status.Minipools {
@@ -60,9 +53,6 @@ func getStatus(c *cli.Context) error {
 			// Add to actionable lists
 			if minipool.RefundAvailable {
 				refundableMinipools = append(refundableMinipools, minipool)
-			}
-			if minipool.WithdrawalAvailable {
-				withdrawableMinipools = append(withdrawableMinipools, minipool)
 			}
 			if minipool.CloseAvailable {
 				closeableMinipools = append(closeableMinipools, minipool)
@@ -187,7 +177,7 @@ func printMinipoolDetails(minipool api.MinipoolDetails, latestDelegate common.Ad
 	if minipool.Status.Status == types.Prelaunch ||
 		minipool.Status.Status == types.Staking {
 		fmt.Printf("Validator pubkey:      %s\n", hex.AddPrefix(minipool.ValidatorPubkey.Hex()))
-		fmt.Printf("Validator index:       %d\n", minipool.Validator.Index)
+		fmt.Printf("Validator index:       %s\n", minipool.Validator.Index)
 		if minipool.Validator.Exists {
 			if minipool.Validator.Active {
 				fmt.Printf("Validator active:      yes\n")

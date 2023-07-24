@@ -13,17 +13,11 @@ import (
 func processQueue(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
+	rp, err := rocketpool.NewClientFromCtx(c).WithReady()
 	if err != nil {
 		return err
 	}
 	defer rp.Close()
-
-	// Check and assign the EC status
-	err = cliutils.CheckClientStatus(rp)
-	if err != nil {
-		return err
-	}
 
 	// Check deposit queue can be processed
 	canProcess, err := rp.CanProcessQueue()
@@ -34,14 +28,6 @@ func processQueue(c *cli.Context) error {
 		fmt.Println("The deposit queue cannot be processed:")
 		if canProcess.AssignDepositsDisabled {
 			fmt.Println("Deposit assignments are currently disabled.")
-		}
-		if !canProcess.IsAtlasDeployed {
-			if canProcess.NoMinipoolsAvailable {
-				fmt.Println("No minipools are available for assignment.")
-			}
-			if canProcess.InsufficientDepositBalance {
-				fmt.Println("The deposit pool has an insufficient balance for assignment.")
-			}
 		}
 		return nil
 	}

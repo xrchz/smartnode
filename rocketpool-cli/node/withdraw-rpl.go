@@ -17,17 +17,11 @@ import (
 func nodeWithdrawRpl(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
+	rp, err := rocketpool.NewClientFromCtx(c).WithReady()
 	if err != nil {
 		return err
 	}
 	defer rp.Close()
-
-	// Check and assign the EC status
-	err = cliutils.CheckClientStatus(rp)
-	if err != nil {
-		return err
-	}
 
 	// Get withdrawal mount
 	var amountWei *big.Int
@@ -105,9 +99,6 @@ func nodeWithdrawRpl(c *cli.Context) error {
 		}
 		if canWithdraw.WithdrawalDelayActive {
 			fmt.Println("The withdrawal delay period has not passed.")
-		}
-		if !canWithdraw.IsAtlasDeployed && !canWithdraw.InConsensus {
-			fmt.Println("The RPL price and total effective staked RPL of the network are still being voted on by the Oracle DAO.\nPlease try again in a few minutes.")
 		}
 		return nil
 	}

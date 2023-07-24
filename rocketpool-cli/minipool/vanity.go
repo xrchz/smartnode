@@ -21,17 +21,11 @@ import (
 func findVanitySalt(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
+	rp, err := rocketpool.NewClientFromCtx(c).WithReady()
 	if err != nil {
 		return err
 	}
 	defer rp.Close()
-
-	// Check and assign the EC status
-	err = cliutils.CheckClientStatus(rp)
-	if err != nil {
-		return err
-	}
 
 	// Get the target prefix
 	prefix := c.String("prefix")
@@ -82,53 +76,19 @@ func findVanitySalt(c *cli.Context) error {
 			return err
 		}
 	} else {
-		// Check if Atlas is deployed
-		atlasResponse, err := rp.IsAtlasDeployed()
-		if err != nil {
-			return fmt.Errorf("error checking if Atlas has been deployed: %w", err)
+		// Get deposit amount options
+		amountOptions := []string{
+			"8 ETH",
+			"16 ETH",
 		}
 
-		if !atlasResponse.IsAtlasDeployed {
-			// Get node status
-			status, err := rp.NodeStatus()
-			if err != nil {
-				return err
-			}
-
-			// Get deposit amount options
-			amountOptions := []string{
-				"32 ETH (minipool begins staking immediately)",
-				"16 ETH (minipool begins staking after ETH is assigned)",
-			}
-			if status.Trusted {
-				amountOptions = append(amountOptions, "0 ETH  (minipool begins staking after ETH is assigned)")
-			}
-
-			// Prompt for amount
-			selected, _ := cliutils.Select("Please choose a deposit type to search for:", amountOptions)
-			switch selected {
-			case 0:
-				amount = 32
-			case 1:
-				amount = 16
-			case 2:
-				amount = 0
-			}
-		} else {
-			// Get deposit amount options
-			amountOptions := []string{
-				"8 ETH",
-				"16 ETH",
-			}
-
-			// Prompt for amount
-			selected, _ := cliutils.Select("Please choose a deposit type to search for:", amountOptions)
-			switch selected {
-			case 0:
-				amount = 8
-			case 1:
-				amount = 16
-			}
+		// Prompt for amount
+		selected, _ := cliutils.Select("Please choose a deposit type to search for:", amountOptions)
+		switch selected {
+		case 0:
+			amount = 8
+		case 1:
+			amount = 16
 		}
 	}
 	amountWei := eth.EthToWei(amount)

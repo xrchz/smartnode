@@ -17,17 +17,11 @@ import (
 func nodeStakeRpl(c *cli.Context) error {
 
 	// Get RP client
-	rp, err := rocketpool.NewClientFromCtx(c)
+	rp, err := rocketpool.NewClientFromCtx(c).WithReady()
 	if err != nil {
 		return err
 	}
 	defer rp.Close()
-
-	// Check and assign the EC status
-	err = cliutils.CheckClientStatus(rp)
-	if err != nil {
-		return err
-	}
 
 	// Get node status
 	status, err := rp.NodeStatus()
@@ -320,9 +314,6 @@ func nodeStakeRpl(c *cli.Context) error {
 		fmt.Println("Cannot stake RPL:")
 		if canStake.InsufficientBalance {
 			fmt.Println("The node's RPL balance is insufficient.")
-		}
-		if !canStake.IsAtlasDeployed && !canStake.InConsensus {
-			fmt.Println("The RPL price and total effective staked RPL of the network are still being voted on by the Oracle DAO.\nPlease try again in a few minutes.")
 		}
 		return nil
 	}
