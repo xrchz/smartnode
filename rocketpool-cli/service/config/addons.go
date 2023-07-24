@@ -16,6 +16,7 @@ type AddonsPage struct {
 	layout        *standardLayout
 	masterConfig  *config.RocketPoolConfig
 	gwwPage       *AddonGwwPage
+	arbPage       *AddonArbPage
 	gwwButton     *parameterizedFormItem
 	categoryList  *tview.List
 	addonSubpages []settingsPage
@@ -39,8 +40,10 @@ func NewAddonsPage(home *settingsHome) *AddonsPage {
 
 	// Create the addon subpages
 	addonsPage.gwwPage = NewAddonGwwPage(addonsPage, home.md.Config.GraffitiWallWriter)
+	addonsPage.arbPage = NewAddonArbPage(addonsPage, home.md.Config.RocketArb)
 	addonSubpages := []settingsPage{
 		addonsPage.gwwPage,
+		addonsPage.arbPage,
 	}
 	addonsPage.addonSubpages = addonSubpages
 

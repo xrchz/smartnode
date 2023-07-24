@@ -123,6 +123,7 @@ type RocketPoolConfig struct {
 
 	// Addons
 	GraffitiWallWriter addontypes.SmartnodeAddon `yaml:"addon-gww,omitempty"`
+	RocketArb addontypes.SmartnodeAddon `yaml:"addon-arb,omitempty"`
 }
 
 // Load configuration settings from a file
@@ -469,6 +470,7 @@ func NewRocketPoolConfig(rpDir string, isNativeMode bool) *RocketPoolConfig {
 
 	// Addons
 	cfg.GraffitiWallWriter = addons.NewGraffitiWallWriter()
+	cfg.RocketArb = addons.NewRocketArb()
 
 	// Apply the default values for mainnet
 	cfg.Smartnode.Network.Value = cfg.Smartnode.Network.Options[0].Value
@@ -570,6 +572,7 @@ func (cfg *RocketPoolConfig) GetSubconfigs() map[string]config.Config {
 		"native":             cfg.Native,
 		"mevBoost":           cfg.MevBoost,
 		"addons-gww":         cfg.GraffitiWallWriter.GetConfig(),
+		"addons-arb":         cfg.RocketArb.GetConfig(),
 	}
 }
 
@@ -1017,6 +1020,7 @@ func (cfg *RocketPoolConfig) GenerateEnvironmentVariables() map[string]string {
 
 	// Addons
 	cfg.GraffitiWallWriter.UpdateEnvVars(envVars)
+	cfg.RocketArb.UpdateEnvVars(envVars)
 
 	return envVars
 
